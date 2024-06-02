@@ -15,6 +15,7 @@ from litgpt.data.text_files import TextFiles
 from litgpt.data.tinyllama import TinyLlama
 from litgpt.data.tinystories import TinyStories
 from litgpt.data.openwebtext import OpenWebText
+from litgpt.data.fineweb import FineWeb
 
 
 __all__ = [
@@ -30,6 +31,7 @@ __all__ = [
     "DataModule",
     "LongForm",
     "OpenWebText",
+    "FineWeb",
     "SFTDataset",
     "TextFiles",
     "TinyLlama",

@@ -10,7 +10,12 @@ from litgpt.scripts.convert_lit_checkpoint import convert_lit_checkpoint
 from litgpt.utils import CLI, copy_config_files
 
 
-def prepare_results(results, save_filepath, print_results=True):
+def prepare_results(results, tasks, save_filepath, print_results=True):
+    for filename in os.listdir(save_filepath.parent):
+        file_path = os.path.join(save_filepath.parent, filename)
+        if os.path.isfile(file_path):
+            os.remove(file_path)
+
     from lm_eval.utils import make_table
 
     if print_results:
@@ -18,11 +23,26 @@ def prepare_results(results, save_filepath, print_results=True):
         if "groups" in results:
             print(make_table(results, "groups"))
 
-    json_result = json.dumps(
-        results, indent=2, ensure_ascii=False
-    )
+    json_result = json.dumps(results["results"], indent=2, ensure_ascii=False)
     save_filepath.open("w", encoding="utf-8").write(json_result)
 
+    with open(save_filepath.parent / "results.txt", "w") as fw:
+        for task in tasks:
+            if "acc_norm,none" in results["results"][task]:
+                fw.write(
+                        "{:.3f} ± {:.3f}".format(
+                            results["results"][task]["acc_norm,none"],
+                            results["results"][task]["acc_norm_stderr,none"],
+                        )
+                        + "\t"
+                    )
+            else:
+                fw.write(
+                    "{:.3f} ± {:.3f}\t".format(
+                        results["results"][task]["acc,none"],
+                        results["results"][task]["acc_stderr,none"],
+                    )
+                )
 
 def convert_and_evaluate(
     checkpoint_dir: Path,
@@ -59,6 +79,7 @@ def convert_and_evaluate(
 
     if tasks is None:
         from lm_eval.tasks import TaskManager
+
         taskm = TaskManager()
         print("\n".join(taskm.task_index.keys()))
         print(
@@ -80,13 +101,15 @@ def convert_and_evaluate(
         out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    save_filepath = out_dir / Path("results.json") if save_filepath is None else Path(save_filepath)
+    save_filepath = (
+        out_dir / Path("results.json") if save_filepath is None else Path(save_filepath)
+    )
 
     model_path = out_dir / "pytorch_model.bin"
     if not model_path.exists() or force_conversion:
         copy_config_files(source_dir=checkpoint_dir, out_dir=out_dir)
         convert_lit_checkpoint(checkpoint_dir=checkpoint_dir, output_dir=out_dir)
-    
+
         # Hack: LitGPT's conversion doesn't save a pickle file that is compatible to be loaded with
         # `torch.load(..., weights_only=True)`, which is a requirement in HFLM.
         # So we're `torch.load`-ing and `torch.sav`-ing it again to work around this.
@@ -96,7 +119,12 @@ def convert_and_evaluate(
 
     from lm_eval.models.huggingface import HFLM
 
-    model = HFLM(pretrained=str(out_dir.resolve()), device=device, batch_size=batch_size, dtype=dtype)
+    model = HFLM(
+        pretrained=str(out_dir.resolve()),
+        device=device,
+        batch_size=batch_size,
+        dtype=dtype,
+    )
 
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
@@ -111,4 +139,4 @@ def convert_and_evaluate(
         numpy_random_seed=seed,
         torch_random_seed=seed,
     )
-    prepare_results(results, save_filepath)
+    prepare_results(results, tasks.split(","), save_filepath)

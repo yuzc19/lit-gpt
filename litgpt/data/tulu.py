@@ -5,16 +5,16 @@ from pathlib import Path
 from typing import List, Optional, Union
 
 import torch
-from torch.utils.data import DataLoader
 
 from litgpt import PromptStyle
-from litgpt.data import DataModule, SFTDataset, get_sft_collate_fn
+from litgpt.data import DataModule, get_sft_collate_fn, SFTDataset
 from litgpt.tokenizer import Tokenizer
+from torch.utils.data import DataLoader
 
 
 @dataclass
-class Deita(DataModule):
-    """Deita data module for supervised finetuning."""
+class Tulu(DataModule):
+    """Tulu data module for supervised finetuning."""
 
     mask_prompt: bool = False
     """Whether to mask the prompt section from the label (with ``ignore_index``)."""
@@ -28,9 +28,9 @@ class Deita(DataModule):
     """How many DataLoader processes to use for loading."""
     include_multiturn_conversations: bool = False
     """Whether to include multi-turn conversations in the dataset."""
-    download_dir: Path = Path("/data/users/zichunyu/data/deita")
+    download_dir: Path = Path("/data/users/zichunyu/data/tulu")
     """The directory in which the downloaded dataset gets saved."""
-    repo_id: str = "HuggingFaceH4/deita-10k-v0-sft"
+    repo_id: str = "allenai/tulu-v2-sft-mixture"
     """The repo from where the data is downloaded"""
 
     tokenizer: Optional[Tokenizer] = field(default=None, init=False, repr=False)
@@ -44,7 +44,10 @@ class Deita(DataModule):
             self.prompt_style = PromptStyle.from_name(self.prompt_style)
 
     def connect(
-        self, tokenizer: Optional[Tokenizer] = None, batch_size: int = 1, max_seq_length: Optional[int] = None
+        self,
+        tokenizer: Optional[Tokenizer] = None,
+        batch_size: int = 1,
+        max_seq_length: Optional[int] = None,
     ) -> None:
         self.tokenizer = tokenizer
         self.batch_size = batch_size
@@ -53,14 +56,22 @@ class Deita(DataModule):
     def prepare_data(self) -> None:
         from datasets import load_dataset
 
-        load_dataset(self.repo_id, split=["train_sft", "test_sft"], cache_dir=self.download_dir)
+        load_dataset(self.repo_id, split=["train"], cache_dir=self.download_dir)
 
     def setup(self, stage: str = "") -> None:
         from datasets import load_dataset
 
-        dataset = load_dataset(self.repo_id, split=["train_sft", "test_sft"])
-        train_data = format_dataset(dataset[0], self.include_multiturn_conversations)
-        test_data = format_dataset(dataset[1], self.include_multiturn_conversations)
+        dataset = load_dataset(self.repo_id, split=["train"])
+        dataset = dataset[0].train_test_split(
+            test_size=0.01, seed=self.seed, shuffle=True
+        )
+        train_data = format_dataset(
+            dataset["train"], self.include_multiturn_conversations
+        )
+        # 998, all the same
+        test_data = format_dataset(
+            dataset["test"], self.include_multiturn_conversations
+        )
 
         self.train_dataset = SFTDataset(
             data=train_data,
@@ -86,7 +97,9 @@ class Deita(DataModule):
             shuffle=True,
             generator=torch.Generator().manual_seed(self.seed),
             num_workers=self.num_workers,
-            collate_fn=get_sft_collate_fn(max_seq_length=self.max_seq_length, ignore_index=self.ignore_index),
+            collate_fn=get_sft_collate_fn(
+                max_seq_length=self.max_seq_length, ignore_index=self.ignore_index
+            ),
         )
 
     def val_dataloader(self) -> DataLoader:
@@ -95,19 +108,38 @@ class Deita(DataModule):
             batch_size=self.batch_size,
             shuffle=False,
             num_workers=self.num_workers,
-            collate_fn=get_sft_collate_fn(max_seq_length=self.max_seq_length, ignore_index=self.ignore_index),
+            collate_fn=get_sft_collate_fn(
+                max_seq_length=self.max_seq_length, ignore_index=self.ignore_index
+            ),
         )
 
 
-def format_dataset(dataset: List[dict], include_multi_turn_conversations: bool) -> List[dict]:
+def format_dataset(
+    dataset: List[dict], include_multi_turn_conversations: bool
+) -> List[dict]:
     formatted = []
 
     for entry in dataset:
+        if entry["dataset"] != "flan_v2" and entry["dataset"] != "cot":
+            continue
         convo = entry["messages"]
         if include_multi_turn_conversations:
             for i in range(0, len(convo) - 1, 2):
-                formatted.append({"instruction": convo[i]["content"], "input": "", "output": convo[i + 1]["content"]})
+                formatted.append(
+                    {
+                        "instruction": convo[i]["content"],
+                        "input": "",
+                        "output": convo[i + 1]["content"],
+                    }
+                )
         else:
-            formatted.append({"instruction": convo[0]["content"], "input": "", "output": convo[1]["content"]})
+            formatted.append(
+                {
+                    "instruction": convo[0]["content"],
+                    "input": "",
+                    "output": convo[1]["content"],
+                }
+            )
+    print(len(formatted))
 
     return formatted

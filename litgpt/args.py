@@ -31,6 +31,8 @@ class TrainArgs:
     """Limits the length of samples"""
     tie_embeddings: Optional[bool] = None
     """Whether to tie the embedding weights with the language modeling head weights"""
+    resume_steps: Optional[int] = None
+    """Number of optimizer steps to skip when resuming from a checkpoint"""
 
     # Optimization args
     max_norm: Optional[float] = None
@@ -59,9 +61,14 @@ class TrainArgs:
     def warmup_iters(self, devices: int, max_iters: int, train_dataloader) -> int:
         """Number of iterations to warm up the learning rate."""
         if self.lr_warmup_fraction:
-            return min(max_iters, math.ceil(self.lr_warmup_fraction * len(train_dataloader)))
+            return min(
+                max_iters, math.ceil(self.lr_warmup_fraction * len(train_dataloader))
+            )
         if self.lr_warmup_steps:
-            return min(max_iters, self.lr_warmup_steps * self.gradient_accumulation_iters(devices))
+            return min(
+                max_iters,
+                self.lr_warmup_steps * self.gradient_accumulation_iters(devices),
+            )
         return 0
 
 

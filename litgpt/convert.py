@@ -43,7 +43,7 @@ from typing_extensions import Literal
 def setup(
     model_name: Optional[str] = None,
     model_config: Optional[Config] = None,
-    in_dir: Path = Path("in/pretrain"),
+    in_dir: Path = Path("out/pretrain"),
     out_dir: Path = Path("out/pretrain"),
     precision: Literal["bf16-true", "bf16-mixed", "32-true", None] = None,
     initial_checkpoint_dir: Optional[Path] = None,
@@ -123,6 +123,7 @@ def setup(
         out_dir,
         tokenizer_dir,
         train,
+        optimizer,
     )
 
 
@@ -136,6 +137,7 @@ def main(
     out_dir: Path,
     tokenizer_dir: Optional[Path],
     train: TrainArgs,
+    optimizer: Union[str, Dict],
 ) -> None:
     if fabric.global_rank == 0:
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -159,10 +161,16 @@ def main(
 
     model = fabric.setup(model)
 
+    extra_kwargs = {"fused": fabric.device.type == "cuda"}
+    optimizer = instantiate_torch_optimizer(
+        optimizer, model.parameters(), **extra_kwargs
+    )
+    optimizer = fabric.setup_optimizers(optimizer)
+
     if initial_checkpoint_dir:
         fabric.load_raw(initial_checkpoint_dir / "lit_model.pth", model)
 
-    state = {"model": model}
+    state = {"model": model, "optimizer": optimizer}
 
     if train.resume_steps > 0:
         resume = in_dir / f"step-{train.resume_steps:08d}/lit_model.pth"

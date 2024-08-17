@@ -61,9 +61,12 @@ class Tulu(DataModule):
     def setup(self, stage: str = "") -> None:
         from datasets import load_dataset
 
-        dataset = load_dataset(self.repo_id, split=["train"])
+        dataset = load_dataset(
+            self.repo_id, split=["train"], cache_dir=self.download_dir
+        )
+        # previous 0.01
         dataset = dataset[0].train_test_split(
-            test_size=0.01, seed=self.seed, shuffle=True
+            test_size=0.001, seed=self.seed, shuffle=True
         )
         train_data = format_dataset(
             dataset["train"], self.include_multiturn_conversations

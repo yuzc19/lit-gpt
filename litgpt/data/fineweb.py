@@ -5,20 +5,20 @@ from functools import partial
 from pathlib import Path
 from typing import Optional, Union
 
-from torch.utils.data import DataLoader
-
 from litgpt import Tokenizer
 from litgpt.data import DataModule
+
+from torch.utils.data import DataLoader
 
 
 @dataclass
 class FineWeb(DataModule):
     """The FineWeb data module for pretraining."""
 
-    data_path: Union[str, Path] = Path("/data/users/zichunyu/data/fineweb/sample-10BT")
+    data_path: Union[str, Path] = Path("/data/users/zichunyu/data/fineweb/sample-100BT")
     """The path to the data directory, containing two folders 'train' and 'val'
     which are the output of the preprocessing step. The path can also be a remote path (e.g., s3://)."""
-    val_split_fraction: float = 0.0005
+    val_split_fraction: float = 0.003
     """The fraction of data that should be put aside for validation."""
     seed: int = 42
     """The seed to use for shuffling the training data."""
@@ -63,11 +63,14 @@ class FineWeb(DataModule):
             return
 
         dataset = load_dataset(
-            "HuggingFaceFW/fineweb",
-            num_proc=os.cpu_count() // 2,
-            name="sample-10BT",  # 14.9M examples
-            cache_dir="/data/users/zichunyu/data/hf_cache",
-            split="train",
+            # "HuggingFaceFW/fineweb",
+            "/mnt/mffuse/pretrain_recommendation/sample-350BT/0.0.0/922442327a589c50e417c98f934c7b62729017b6",
+            num_proc=(os.cpu_count() - 1),
+            # name="sample-10BT",  # 14.9M examples
+            # name="sample-100BT",  # 149M examples
+            # name="sample-350BT",  # 521.5M examples
+            # cache_dir="/data/users/zichunyu/data/hf_cache",
+            # split="train",
         )
         print("Total examples:", len(dataset))
 

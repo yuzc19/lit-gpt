@@ -13,6 +13,7 @@ datasets
 !litgpt/data
 !tests/data
 checkpoints
+scripts
 out
 wandb
 events.out.tfevents*

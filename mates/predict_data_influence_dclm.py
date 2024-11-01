@@ -1,11 +1,10 @@
 import argparse
 import os
 
+import datasets
 import torch
 from datasets import Dataset
-from litdata.streaming import StreamingDataset, TokensLoader
 from modeling_data_influence_model import BertForSequenceClassification
-from transformers import AutoTokenizer
 
 
 class ModelAnnotator:
@@ -61,66 +60,38 @@ if __name__ == "__main__":
     args = parser.parse_args()
     print(args)
 
-    model_dir = f"{args.base_dir}/out/{args.model_name}/fineweb/sample-350BT/{args.ckpt}-data_influence_model"
-    output_dir = f"{args.base_dir}/out/{args.model_name}/fineweb/sample-350BT/train/0/{args.ckpt}-data_influence_model-prediction"
+    data_dir = f"{args.base_dir}/dclm/output/refinedweb_01_0/fasttext/fasttext_filter/processed_data"
+    model_dir = f"{args.base_dir}/out/{args.model_name}/fineweb/sample-100BT/{args.ckpt}-data_influence_model"
+    output_dir = f"{args.base_dir}/out/{args.model_name}/refinedweb_01_0/fasttext/fasttext_filter/{args.ckpt}-data_influence_model-prediction"
 
-    num_proc = 8
-    # 50M examples in total, 100B Tokens
-    dataset = StreamingDataset(
-        input_dir=f"{args.base_dir}/data/fineweb/sample-350BT/train/0",
-        item_loader=TokensLoader(block_size=2048 + 1),
-    )
-    # 3M examples/GPU for 10k steps
-    shard_size = int(1e6)
-    # shard_size = len(dataset) // args.shard[1]
-    dataset = dataset[
-        args.base
-        + args.shard[0]
-        * shard_size : (
-            args.base + (args.shard[0] + 1) * shard_size
-            if args.shard[0] + 1 < args.shard[1]
-            else len(dataset)
-        )
+    file_list = [
+        os.path.abspath(os.path.join(data_dir, f))
+        for f in os.listdir(data_dir)
+        if not f.startswith(".")
     ]
-
-    os.makedirs(output_dir + f"/{args.shard[0]}", exist_ok=True)
-    torch.save(
-        dataset[:5] + dataset[-5:],
-        output_dir + f"/{args.shard[0]}/sanity_check.pt",
+    shard_size = len(file_list) // args.shard[1]
+    print(
+        args.shard[0] * shard_size,
+        (
+            (args.shard[0] + 1) * shard_size
+            if args.shard[0] + 1 < args.shard[1]
+            else len(file_list)
+        ),
     )
-    dataset = Dataset.from_list([{"ori_input_ids": d[:2048]} for d in dataset])
-
-    print("Total number of examples:", len(dataset))
-
-    # Load pythia tokenizer
-    pythia_tokenizer = AutoTokenizer.from_pretrained("checkpoints/EleutherAI/pythia-1b")
-    tokenizer = AutoTokenizer.from_pretrained(
-        "checkpoints/bert-base-uncased",
-        max_length=2048,
-        padding="max_length",
+    dataset = datasets.concatenate_datasets(
+        [
+            datasets.load_from_disk(file_list[i])
+            for i in range(
+                args.shard[0] * shard_size,
+                (
+                    (args.shard[0] + 1) * shard_size
+                    if args.shard[0] + 1 < args.shard[1]
+                    else len(file_list)
+                ),
+            )
+        ]
     )
-
-    def preprocess_data(examples):
-        texts = pythia_tokenizer.batch_decode(
-            examples["ori_input_ids"],
-            skip_special_tokens=True,
-        )
-        encoding = tokenizer.batch_encode_plus(
-            texts,
-            max_length=2048,
-            padding="max_length",
-            truncation=True,
-        )
-        return encoding
-
-    dataset = dataset.map(
-        preprocess_data,
-        batched=True,
-        batch_size=args.map_batch_size,
-        num_proc=num_proc,
-        remove_columns=dataset.column_names,
-    )
-    print("After tokenization: Total number of examples:", len(dataset))
+    print("Before tokenization: Total number of examples:", len(dataset))
 
     dataset = dataset.map(
         ModelAnnotator(model_dir, args.device_batch_size),

@@ -16,7 +16,7 @@ def load_datasets_tar(oracle_dir):
     # step-10000-10BT, 5000 for each
     # step-10000-100BT, 3153 for each
     dataset = datasets.concatenate_datasets(
-        [datasets.load_from_disk(f"{oracle_dir}/{i}") for i in range(8)]
+        [datasets.load_from_disk(f"{oracle_dir}/{i}") for i in range(16)]
     )
 
     dataset = dataset.train_test_split(test_size=0.1, seed=1234, shuffle=True)
@@ -28,13 +28,17 @@ def load_datasets_tar(oracle_dir):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model_name", type=str, default="pythia-410m", required=False)
-    parser.add_argument("--ckpt", type=int, default=80000, required=False)
+    parser.add_argument("--model_name", type=str, default="pythia-1b", required=False)
+    parser.add_argument("--ckpt", type=int, default=10000, required=False)
 
     args = parser.parse_args()
     print(args)
 
-    train_dataset, eval_dataset = load_datasets_tar(f"out/step-{args.ckpt}-flan")
+    train_dataset, eval_dataset = load_datasets_tar(
+        # f"out/step-10000-flan"
+        # f"out/step-{args.ckpt}-bs-1/pythia-1b"
+        f"pythia-1b"
+    )
     mean_value = np.mean(np.array(train_dataset["scores"])[:, 0])
     std_value = np.std(np.array(train_dataset["scores"])[:, 0])
     print(np.array(train_dataset["scores"])[:, 0].shape, mean_value, std_value)
@@ -55,17 +59,16 @@ if __name__ == "__main__":
         texts = pythia_tokenizer.batch_decode(
             examples["ori_input_ids"], skip_special_tokens=True
         )
-        encoding = tokenizer.batch_encode_plus(
+        enc = tokenizer.batch_encode_plus(
             texts,
             max_length=2048,
             padding="max_length",
             truncation=True,
         )
         # Convert the labels to float for regression
-        encoding["labels"] = [
-            (float(score[0]) - mean_value) / std_value for score in examples["scores"]
-        ]
-        return encoding
+        scores = examples["scores"]
+        enc["labels"] = [(float(s[0]) - mean_value) / std_value for s in scores]
+        return enc
 
     # Process and encode the datasets
     train_dataset = train_dataset.map(
@@ -86,7 +89,7 @@ if __name__ == "__main__":
     # Load model for sequence classification with a regression head
     model = BertForSequenceClassification.from_pretrained(
         "bert-base-uncased",
-        # f"/data/users/zichunyu/out/{args.model_name}/fineweb/sample-100BT/{args.ckpt}-data_influence_model",
+        # f"/data/users/zichunyu/out/{args.model_name}/fineweb/sample-100BT/{args.ckpt}-data_influence_model-flan",
         problem_type="regression",
         num_labels=1,
     )
@@ -96,7 +99,9 @@ if __name__ == "__main__":
 
     args = TrainingArguments(
         # accelerate 0.22.0
-        f"/data/users/zichunyu/out/{args.model_name}/fineweb/sample-100BT/{args.ckpt}-data_influence_model-flan",
+        # bs-1 (10000): 'eval_pearson': 0.4484906923255437, 'eval_spearman': 0.6899116513368633
+        # bs-1 (20000): 'eval_pearson': 0.6661371438984552, 'eval_spearman': 0.683807173880882,
+        f"/data/users/zichunyu/out/{args.model_name}/fineweb/sample-350BT/{args.ckpt}-data_influence_model-val",
         evaluation_strategy="steps",
         save_strategy="steps",
         learning_rate=5e-5,
@@ -104,12 +109,13 @@ if __name__ == "__main__":
         per_device_eval_batch_size=batch_size,
         num_train_epochs=5,
         logging_steps=10,
-        eval_steps=50,
-        save_steps=50,
+        eval_steps=100,
+        save_steps=100,
         weight_decay=0.01,
         load_best_model_at_end=True,
         metric_for_best_model="spearman",
         bf16=True,
+        report_to="none",
     )
 
     # Define regression metrics

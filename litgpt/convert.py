@@ -170,7 +170,12 @@ def main(
     if initial_checkpoint_dir:
         fabric.load_raw(initial_checkpoint_dir / "lit_model.pth", model)
 
-    state = {"model": model, "optimizer": optimizer}
+    state = {
+        "model": model,
+        "optimizer": optimizer,
+        "iter_num": 0,
+        "step_count": 0,
+    }
 
     if train.resume_steps > 0:
         resume = in_dir / f"step-{train.resume_steps:08d}/lit_model.pth"
@@ -183,6 +188,11 @@ def main(
     if resume:
         fabric.print(f"Resuming training from {resume}")
         fabric.load(resume, state)
+    
+    print(state["iter_num"], state["step_count"])
+    exit(0)
+    state["iter_num"] = 30000 * 4
+    state["step_count"] = 30000
 
     # Save final checkpoint
     save_checkpoint(
@@ -224,11 +234,11 @@ def save_checkpoint(fabric, state, tokenizer_dir, checkpoint_file):
     checkpoint_file.parent.mkdir(parents=True, exist_ok=True)
     fabric.print(f"Saving checkpoint to {str(checkpoint_file)!r}")
     fabric.save(checkpoint_file, state)
-    if fabric.global_rank == 0:
-        save_hyperparameters(setup, checkpoint_file.parent)
-        if tokenizer_dir is not None:
-            copy_config_files(tokenizer_dir, checkpoint_file.parent)
-        save_config(model.config, checkpoint_file.parent)
+    # if fabric.global_rank == 0:
+    #     save_hyperparameters(setup, checkpoint_file.parent)
+    #     if tokenizer_dir is not None:
+    #         copy_config_files(tokenizer_dir, checkpoint_file.parent)
+    #     save_config(model.config, checkpoint_file.parent)
 
 
 if __name__ == "__main__":

@@ -33,6 +33,8 @@ class TrainArgs:
     """Whether to tie the embedding weights with the language modeling head weights"""
     resume_steps: Optional[int] = None
     """Number of optimizer steps to skip when resuming from a checkpoint"""
+    decay: Optional[bool] = None
+    """Whether to decay the learning rate"""
 
     # Optimization args
     max_norm: Optional[float] = None

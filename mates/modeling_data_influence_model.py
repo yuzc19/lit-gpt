@@ -5,7 +5,6 @@ from typing import List, Optional, Tuple, Union
 from torch import nn
 import torch
 
-
 class BertForSequenceClassification(BertPreTrainedModel):
     def __init__(self, config):
         super().__init__(config)

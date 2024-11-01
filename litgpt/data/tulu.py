@@ -65,9 +65,7 @@ class Tulu(DataModule):
             self.repo_id, split=["train"], cache_dir=self.download_dir
         )
         # previous 0.01
-        dataset = dataset[0].train_test_split(
-            test_size=0.001, seed=self.seed, shuffle=True
-        )
+        dataset = dataset[0].train_test_split(test_size=0.001, seed=42, shuffle=True)
         train_data = format_dataset(
             dataset["train"], self.include_multiturn_conversations
         )

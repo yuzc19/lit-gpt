@@ -4,8 +4,7 @@ import os
 import torch
 from datasets import Dataset
 from litdata.streaming import StreamingDataset, TokensLoader
-from modeling_data_influence_model import BertForSequenceClassification
-from transformers import AutoTokenizer
+from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
 
 class ModelAnnotator:
@@ -13,11 +12,10 @@ class ModelAnnotator:
         self.model_name = model_name
         self.device_batch_size = device_batch_size
 
-        self.model = BertForSequenceClassification.from_pretrained(
+        self.model = AutoModelForSequenceClassification.from_pretrained(
             model_name,
             torch_dtype=torch.bfloat16,
-            problem_type="regression",
-            num_labels=1,
+            # cache_dir="../manifold/scaling_mates/data/hf_cache",
         )
         self.model.eval()
 
@@ -51,7 +49,6 @@ class ModelAnnotator:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--base_dir", type=str, default="/data/users/zichunyu")
-    parser.add_argument("--model_name", type=str, default="pythia-1b")
     parser.add_argument("--ckpt", type=int, default=10000)
     parser.add_argument("--base", type=int, default=0)
     parser.add_argument("-S", "--shard", type=int, nargs=2, default=[0, 1])
@@ -61,13 +58,10 @@ if __name__ == "__main__":
     args = parser.parse_args()
     print(args)
 
-    model_dir = f"{args.base_dir}/out/{args.model_name}/fineweb/sample-350BT/{args.ckpt}-data_influence_model"
-    output_dir = f"{args.base_dir}/out/{args.model_name}/fineweb/sample-350BT/train/0/{args.ckpt}-data_influence_model-prediction"
-
     num_proc = 8
     # 50M examples in total, 100B Tokens
     dataset = StreamingDataset(
-        input_dir=f"{args.base_dir}/data/fineweb/sample-350BT/train/0",
+        input_dir=f"{args.base_dir}/data/fineweb/sample-350BT/train/1",
         item_loader=TokensLoader(block_size=2048 + 1),
     )
     # 3M examples/GPU for 10k steps
@@ -82,22 +76,15 @@ if __name__ == "__main__":
             else len(dataset)
         )
     ]
-
-    os.makedirs(output_dir + f"/{args.shard[0]}", exist_ok=True)
-    torch.save(
-        dataset[:5] + dataset[-5:],
-        output_dir + f"/{args.shard[0]}/sanity_check.pt",
-    )
     dataset = Dataset.from_list([{"ori_input_ids": d[:2048]} for d in dataset])
 
     print("Total number of examples:", len(dataset))
 
-    # Load pythia tokenizer
+    # Load tokenizer
     pythia_tokenizer = AutoTokenizer.from_pretrained("checkpoints/EleutherAI/pythia-1b")
     tokenizer = AutoTokenizer.from_pretrained(
-        "checkpoints/bert-base-uncased",
-        max_length=2048,
-        padding="max_length",
+        "HuggingFaceTB/fineweb-edu-classifier",
+        # cache_dir="../manifold/scaling_mates/data/hf_cache",
     )
 
     def preprocess_data(examples):
@@ -107,8 +94,7 @@ if __name__ == "__main__":
         )
         encoding = tokenizer.batch_encode_plus(
             texts,
-            max_length=2048,
-            padding="max_length",
+            padding="longest",
             truncation=True,
         )
         return encoding
@@ -123,7 +109,7 @@ if __name__ == "__main__":
     print("After tokenization: Total number of examples:", len(dataset))
 
     dataset = dataset.map(
-        ModelAnnotator(model_dir, args.device_batch_size),
+        ModelAnnotator("HuggingFaceTB/fineweb-edu-classifier", args.device_batch_size),
         batched=True,
         with_indices=True,
         batch_size=args.device_batch_size,
@@ -131,5 +117,8 @@ if __name__ == "__main__":
     )
     print("After annotation: Total number of examples:", len(dataset))
 
+    output_dir = (
+        f"{args.base_dir}/out/fineweb/sample-350BT/train/1/fineweb-edu-prediction"
+    )
     print(f"Saving to {output_dir}")
     dataset.save_to_disk(output_dir + f"/{args.shard[0]}")

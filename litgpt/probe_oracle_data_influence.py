@@ -14,7 +14,7 @@ import torch.nn as nn
 from datasets import Dataset, Features, Sequence, Value
 from lightning.fabric.strategies import FSDPStrategy
 from lightning.fabric.utilities.throughput import measure_flops, ThroughputMonitor
-from litdata.streaming import StreamingDataset, TokensLoader
+from litdata.streaming import CombinedStreamingDataset, StreamingDataset, TokensLoader
 
 from litgpt import Tokenizer
 from litgpt.args import EvalArgs, TrainArgs
@@ -47,6 +47,7 @@ from typing_extensions import Literal
 def setup(
     model_name: Optional[str] = None,
     model_config: Optional[Config] = None,
+    base_dir: Path = Path("litgpt"),
     out_dir: Path = Path("out/pretrain"),
     precision: Literal["bf16-true", "bf16-mixed", "32-true", None] = None,
     initial_checkpoint_dir: Optional[Path] = None,
@@ -142,6 +143,7 @@ def setup(
         resume,
         config,
         data,
+        base_dir,
         out_dir,
         tokenizer_dir,
         tokenizer,
@@ -160,6 +162,7 @@ def main(
     resume: Union[bool, Path],
     config: Config,
     data: Optional[DataModule],
+    base_dir: Path,
     out_dir: Path,
     tokenizer_dir: Optional[Path],
     tokenizer: Optional[Tokenizer],
@@ -200,44 +203,68 @@ def main(
 
     # different for each rank
     train_dataset = StreamingDataset(
-        input_dir="/data/users/zichunyu/data/fineweb/sample-350BT/val",
+        input_dir=str(base_dir) + "/data/fineweb/sample-350BT/val",
+        # input_dir=str(base_dir)
+        # + "/data/fineweb/sample-100BT/pythia-1b/mates/10000/bs-1-sample",
         item_loader=TokensLoader(block_size=model.max_seq_length + 1),
-        shuffle=True,
         drop_last=True,
     )
-    # 25197
-    train_dataset = IterableDatasetShard(
-        train_dataset,
-        batch_size=1,
-        num_processes=8,
-        process_index=rank,
-    )
-    print(len(train_dataset))  # 3150, each showing the same
+    shard_size = 5000
+    # shard_size = len(train_dataset) // 128
+    train_dataset = train_dataset[
+        rank
+        * shard_size : (
+            (rank + 1) * shard_size if rank + 1 < 128 else len(train_dataset)
+        )
+    ]
+    print("Rank", rank, "Size", len(train_dataset))  # 3150, each showing the same
     train_dataloader = DataLoader(
         train_dataset,
         batch_size=1,
         pin_memory=True,
-        num_workers=8,
-        drop_last=True,
     )
 
     if data:
+        # This will increase the inference time (3s -> 25s)
         data.connect(
             tokenizer=tokenizer,
             batch_size=train.micro_batch_size,
             max_seq_length=model.max_seq_length,
         )
         with fabric.rank_zero_first():
+            data.download_dir = base_dir / "data/tulu"
             data.prepare_data()
         data.setup()
-        val_dataloader = data.val_dataloader()
+        val_dataloader_1 = data.val_dataloader()
+
+        def val_collate_fn(batch):
+            input_ids = [torch.tensor(s["input_ids"], device="cuda") for s in batch]
+            labels = [torch.tensor(s["labels"], device="cuda") for s in batch]
+
+            x = pad_sequence(input_ids, batch_first=True, padding_value=0)
+            y = pad_sequence(labels, batch_first=True, padding_value=-100)
+
+            max_seq_length = model.max_seq_length
+            if max_seq_length:
+                x = x[:, :max_seq_length]
+                y = y[:, :max_seq_length]
+
+            return {"input_ids": x, "labels": y}
+
+        val_dataloader_2 = DataLoader(
+            torch.load(base_dir / "data/lambada_openai/train-1024.pt"),
+            batch_size=train.micro_batch_size,
+            collate_fn=val_collate_fn,
+        )
+        train_dataloader, val_dataloader_1, val_dataloader_2 = fabric.setup_dataloaders(
+            train_dataloader, val_dataloader_1, val_dataloader_2
+        )
+        val_dataloaders = [val_dataloader_1, val_dataloader_2]
     else:
 
         def val_collate_fn(batch):
-            input_ids = [
-                torch.tensor(sample["input_ids"], device="cuda") for sample in batch
-            ]
-            labels = [torch.tensor(sample["labels"], device="cuda") for sample in batch]
+            input_ids = [torch.tensor(s["input_ids"], device="cuda") for s in batch]
+            labels = [torch.tensor(s["labels"], device="cuda") for s in batch]
 
             x = pad_sequence(input_ids, batch_first=True, padding_value=0)
             y = pad_sequence(labels, batch_first=True, padding_value=-100)
@@ -250,27 +277,21 @@ def main(
             return {"input_ids": x, "labels": y}
 
         val_dataloader = DataLoader(
-            torch.load("/data/users/zichunyu/data/lambada_openai/train-1024.pt"),
+            torch.load(base_dir / "data/lambada_openai/train-1024.pt"),
             batch_size=train.micro_batch_size,
             collate_fn=val_collate_fn,
         )
-    train_dataloader, val_dataloader = fabric.setup_dataloaders(
-        train_dataloader, val_dataloader
-    )
-    val_dataloaders = [val_dataloader]
+        train_dataloader, val_dataloader = fabric.setup_dataloaders(
+            train_dataloader, val_dataloader
+        )
+        val_dataloaders = [val_dataloader]
 
     if initial_checkpoint_dir:
         fabric.load_raw(initial_checkpoint_dir / "lit_model.pth", model)
 
-    state = {
-        "model": model,
-        "optimizer": optimizer,
-        "iter_num": 0,
-        "step_count": 0,
-    }
-
     if train.resume_steps > 0:
         resume = out_dir / (f"step-{train.resume_steps:08d}/lit_model.pth")
+    state = fabric.load(resume)
 
     train_time = time.perf_counter()
 
@@ -278,14 +299,13 @@ def main(
     oracle = []
     cnt = 0
     for train_data in tqdm(train_iterator):
-        if cnt == 5000:
-            break
         cnt += 1
-        fabric.load(resume, state)
+        model.load_state_dict(state["model"])
+        optimizer.load_state_dict(state["optimizer"])
         scores = fit(
             fabric,
             devices,
-            state,
+            {"model": model, "optimizer": optimizer},
             train_data,
             val_dataloaders,
             out_dir,
@@ -302,14 +322,22 @@ def main(
                 "scores": scores,
             }
         )
-    features = Features(
-        {
-            "input_ids": Sequence(Value("int32")),
-            "scores": Sequence(Value("float32")),
-        }
-    )
-    processed_ds = Dataset.from_list(oracle, features=features)
-    processed_ds.save_to_disk(f"out/step-{train.resume_steps}-flan/{rank}")
+        if cnt % 2000 == 0 or cnt == len(train_dataset):
+            features = Features(
+                {
+                    "input_ids": Sequence(Value("int32")),
+                    "scores": Sequence(Value("float32")),
+                }
+            )
+            processed_ds = Dataset.from_list(oracle, features=features)
+            if "/mnt" not in str(out_dir):
+                processed_ds.save_to_disk(
+                    f"out/step-{train.resume_steps}-val/{config.name}/{rank}"
+                )
+            else:
+                processed_ds.save_to_disk(
+                    f"{base_dir}/out/step-{train.resume_steps}-val/{config.name}/{rank}"
+                )
 
     fabric.print(f"Training time: {(time.perf_counter()-train_time):.2f}s")
     if fabric.device.type == "cuda":
@@ -332,7 +360,7 @@ def fit(
 
     lr = get_wsd_lr(
         optimizer.defaults["lr"],
-        state["iter_num"],
+        1e6 - 1,
         0,
         1e6,
         train.min_lr,
@@ -343,12 +371,17 @@ def fit(
     input_ids = train_data[:, 0 : model.max_seq_length].contiguous().long()
     targets = train_data[:, 1 : (model.max_seq_length + 1)].contiguous().long()
 
-    logits = model(input_ids)
-    loss = chunked_cross_entropy(logits, targets)
-    fabric.backward(loss)
-    fabric.clip_gradients(model, optimizer, max_norm=train.max_norm)
-    optimizer.step()
-    optimizer.zero_grad()
+    with torch.backends.cuda.sdp_kernel(
+        enable_flash=False,
+        enable_math=True,
+        enable_mem_efficient=False,
+    ):
+        logits = model(input_ids)
+        loss = chunked_cross_entropy(logits, targets)
+        fabric.backward(loss)
+        fabric.clip_gradients(model, optimizer, max_norm=train.max_norm)
+        optimizer.step()
+        optimizer.zero_grad()
 
     return evaluate(fabric, model, val_dataloaders)
 
@@ -357,7 +390,7 @@ def fit(
 def evaluate(fabric, model, val_dataloaders):
     model.eval()
     losses = []
-    for val_dataloader in val_dataloaders:
+    for val_dataloader in val_dataloaders[:1]:
         loss = torch.tensor(0.0, device=fabric.device)
         cnt = 0
         for batch in val_dataloader:

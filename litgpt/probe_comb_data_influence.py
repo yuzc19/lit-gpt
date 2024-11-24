@@ -1,8 +1,10 @@
 # Copyright Lightning AI. Licensed under the Apache License 2.0, see LICENSE file.
 
+import os
 import math
 import pprint
 import time
+import pickle
 from datetime import timedelta
 from functools import partial
 from pathlib import Path
@@ -49,6 +51,9 @@ def setup(
     model_name: Optional[str] = None,
     model_config: Optional[Config] = None,
     base_dir: Path = Path("litgpt"),
+    probe_data_dir: Path = Path(
+        "/data/datasets/hf_cache/data/fineweb/sample-350BT/train/0"
+    ),
     out_dir: Path = Path("out/pretrain"),
     precision: Literal["bf16-true", "bf16-mixed", "32-true", None] = None,
     initial_checkpoint_dir: Optional[Path] = None,
@@ -146,6 +151,7 @@ def setup(
         data,
         base_dir,
         out_dir,
+        probe_data_dir,
         tokenizer_dir,
         tokenizer,
         train,
@@ -165,6 +171,7 @@ def main(
     data: Optional[DataModule],
     base_dir: Path,
     out_dir: Path,
+    probe_data_dir: Path,
     tokenizer_dir: Optional[Path],
     tokenizer: Optional[Tokenizer],
     train: TrainArgs,
@@ -204,13 +211,10 @@ def main(
 
     # different for each rank
     train_dataset = StreamingDataset(
-        # input_dir=f"data/neighbors-{rank}",
-        input_dir=str(base_dir) + "/data/fineweb/sample-350BT/val",
-        # input_dir=str(base_dir)
-        # + "/data/fineweb/sample-100BT/pythia-1b/mates/10000/bs-1-sample",
+        input_dir=str(probe_data_dir),
         item_loader=TokensLoader(block_size=model.max_seq_length + 1),
-        drop_last=True,
     )
+    train_dataset = train_dataset[:500000]
     print("Rank", rank, "Size", len(train_dataset))  # 3150, each showing the same
 
     if data:
@@ -226,33 +230,6 @@ def main(
         data.setup()
         val_dataloader_1 = data.val_dataloader()
 
-        def val_collate_fn(batch):
-            input_ids = [torch.tensor(s["input_ids"], device="cuda") for s in batch]
-            labels = [torch.tensor(s["labels"], device="cuda") for s in batch]
-
-            x = pad_sequence(input_ids, batch_first=True, padding_value=0)
-            y = pad_sequence(labels, batch_first=True, padding_value=-100)
-
-            max_seq_length = model.max_seq_length
-            if max_seq_length:
-                x = x[:, :max_seq_length]
-                y = y[:, :max_seq_length]
-
-            return {"input_ids": x, "labels": y}
-
-        val_dataloader_2 = DataLoader(
-            torch.load(base_dir / "data/lambada_openai/train-1024.pt"),
-            batch_size=32,
-            collate_fn=val_collate_fn,
-        )
-        (
-            val_dataloader_1,
-            val_dataloader_2,
-        ) = fabric.setup_dataloaders(
-            val_dataloader_1,
-            val_dataloader_2,
-        )
-        val_dataloaders = [val_dataloader_1, val_dataloader_2]
     else:
 
         def val_collate_fn(batch):
@@ -269,13 +246,16 @@ def main(
 
             return {"input_ids": x, "labels": y}
 
-        val_dataloader = DataLoader(
-            torch.load(base_dir / "data/lambada_openai/train-1024.pt"),
+        val_dataloader_1 = DataLoader(
+            # torch.load(base_dir / "data/lambada_openai/train-1024.pt"),
+            torch.load(base_dir / "data/sciq/train-32.pt")
+            + torch.load(base_dir / "data/piqa/train-32.pt"),
             batch_size=32,
             collate_fn=val_collate_fn,
         )
-        val_dataloader = fabric.setup_dataloaders(val_dataloader)
-        val_dataloaders = [val_dataloader]
+
+    val_dataloader_1 = fabric.setup_dataloaders(val_dataloader_1)
+    val_dataloaders = [val_dataloader_1]
 
     if initial_checkpoint_dir:
         fabric.load_raw(initial_checkpoint_dir / "lit_model.pth", model)
@@ -287,25 +267,32 @@ def main(
     train_time = time.perf_counter()
 
     dataset_len = len(train_dataset)
-    probe_index = len(train_dataset) - 1
-    probe_data = train_dataset[probe_index].unsqueeze(0)
     # 40s for 1 steps
-    probe_steps = 1
+    # probe_steps = 1
+    start = -1
+    cnt = 10000
     oracle = []
-    cnt = 5000
+    checkpoint_path = f"out/step-{train.resume_steps}-comb-sp/{config.name}/{rank}.pkl"
+    if os.path.exists(checkpoint_path):
+        with open(checkpoint_path, "rb") as f:
+            checkpoint = pickle.load(f)
+            start = checkpoint["start"]
+            oracle = checkpoint["oracle"]
+            fabric.print(f"Resuming from checkpoint start={start}")
+
     for i in tqdm(range(cnt)):
         model.load_state_dict(state["model"])
         optimizer.load_state_dict(state["optimizer"])
-        train_indices = np.random.permutation(probe_index)[
-            : train.global_batch_size * probe_steps
-        ]
+        # train_indices = np.random.permutation(probe_index)[
+        #     : train.global_batch_size * probe_steps
+        # ]
         # probe_data = train_dataset[int(train_indices[0])].unsqueeze(0)
-        train_data = torch.stack([train_dataset[int(index)] for index in train_indices])
-        # with torch.backends.cuda.sdp_kernel(
-        #     enable_flash=False,
-        #     enable_math=True,
-        #     enable_mem_efficient=True,
-        # ):
+        # train_data = torch.stack([train_dataset[int(index)] for index in train_indices])
+        train_index, probe_index = np.random.permutation(dataset_len)[:2]
+        train_data = train_dataset[train_index].unsqueeze(0)
+        probe_data = train_dataset[probe_index].unsqueeze(0)
+        if i <= start:
+            continue
         scores = fit(
             fabric,
             devices,
@@ -320,26 +307,26 @@ def main(
         )
         oracle.append(
             {
-                "train_indices": train_indices,
+                "train_index": train_index,
                 "probe_index": probe_index,
                 "scores": scores,
             }
         )
-        if i == cnt - 1:
+        if i == cnt - 1 or (i + 1) % 1000 == 0:
             features = Features(
                 {
-                    "train_indices": Sequence(Value("int32")),
+                    # "train_indices": Sequence(Value("int32")),
+                    "train_index": Value("int32"),
                     "probe_index": Value("int32"),
                     "scores": Sequence(Value("float32")),
                 }
             )
             processed_ds = Dataset.from_list(oracle, features=features)
-            save_dir = (
-                f"out/step-{train.resume_steps}-comb-0-16/{config.name}/{rank}"
-                if "/mnt" not in str(out_dir)
-                else f"{base_dir}/out/step-{train.resume_steps}/{config.name}/{rank}"
-            )
+            save_dir = f"out/step-{train.resume_steps}-comb-sp/{config.name}/{rank}"
             processed_ds.save_to_disk(save_dir)
+
+            with open(checkpoint_path, "wb") as f:
+                pickle.dump({"start": i, "oracle": oracle}, f)
 
     fabric.print(f"Training time: {(time.perf_counter()-train_time):.2f}s")
     if fabric.device.type == "cuda":
@@ -371,34 +358,38 @@ def fit(
     for param_group in optimizer.param_groups:
         param_group["lr"] = lr
 
-    cnt = 0
-    for train_batch in train_data.split(train.micro_batch_size):
-        input_ids = train_batch[:, 0 : model.max_seq_length].contiguous().long()
-        targets = train_batch[:, 1 : (model.max_seq_length + 1)].contiguous().long()
+    # cnt = 0
+    # for train_batch in train_data.split(train.micro_batch_size):
+    #     input_ids = train_batch[:, 0 : model.max_seq_length].contiguous().long()
+    #     targets = train_batch[:, 1 : (model.max_seq_length + 1)].contiguous().long()
+
+    #     logits = model(input_ids)
+    #     loss = chunked_cross_entropy(logits, targets)
+    #     fabric.backward(loss / train.gradient_accumulation_iters(1))
+    #     fabric.clip_gradients(model, optimizer, max_norm=train.max_norm)
+    #     cnt += 1
+
+    #     if cnt % train.gradient_accumulation_iters(1) == 0:
+    #         optimizer.step()
+    #         optimizer.zero_grad()
+    # eval_after_train = evaluate(fabric, model, val_dataloaders)[0]
+
+    scores = []
+    for now_data in [train_data, probe_data]:
+        input_ids = now_data[:, 0 : model.max_seq_length].contiguous().long()
+        targets = now_data[:, 1 : (model.max_seq_length + 1)].contiguous().long()
 
         logits = model(input_ids)
         loss = chunked_cross_entropy(logits, targets)
-        fabric.backward(loss / train.gradient_accumulation_iters(1))
+        fabric.backward(loss)
         fabric.clip_gradients(model, optimizer, max_norm=train.max_norm)
-        cnt += 1
+        optimizer.step()
+        optimizer.zero_grad()
 
-        if cnt % train.gradient_accumulation_iters(1) == 0:
-            optimizer.step()
-            optimizer.zero_grad()
-    eval_after_train = evaluate(fabric, model, val_dataloaders)[0]
+        scores.append(evaluate(fabric, model, val_dataloaders)[0])
 
-    input_ids = probe_data[:, 0 : model.max_seq_length].contiguous().long()
-    targets = probe_data[:, 1 : (model.max_seq_length + 1)].contiguous().long()
-
-    logits = model(input_ids)
-    loss = chunked_cross_entropy(logits, targets)
-    fabric.backward(loss)
-    fabric.clip_gradients(model, optimizer, max_norm=train.max_norm)
-    optimizer.step()
-    optimizer.zero_grad()
-    eval_after_probe = evaluate(fabric, model, val_dataloaders)[0]
-
-    return [eval_after_train, eval_after_probe]
+    # eval_after_probe = evaluate(fabric, model, val_dataloaders)[0]
+    return scores
 
 
 @torch.no_grad()

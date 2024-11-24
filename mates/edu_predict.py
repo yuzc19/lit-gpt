@@ -15,7 +15,7 @@ class ModelAnnotator:
         self.model = AutoModelForSequenceClassification.from_pretrained(
             model_name,
             torch_dtype=torch.bfloat16,
-            # cache_dir="../manifold/scaling_mates/data/hf_cache",
+            cache_dir="/data/datasets/hf_cache",
         )
         self.model.eval()
 
@@ -48,8 +48,7 @@ class ModelAnnotator:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--base_dir", type=str, default="/data/users/zichunyu")
-    parser.add_argument("--ckpt", type=int, default=10000)
+    parser.add_argument("--base_dir", type=str, default="/data/datasets/hf_cache")
     parser.add_argument("--base", type=int, default=0)
     parser.add_argument("-S", "--shard", type=int, nargs=2, default=[0, 1])
     parser.add_argument("--map_batch_size", type=int, default=1024)
@@ -61,11 +60,12 @@ if __name__ == "__main__":
     num_proc = 8
     # 50M examples in total, 100B Tokens
     dataset = StreamingDataset(
-        input_dir=f"{args.base_dir}/data/fineweb/sample-350BT/train/1",
+        input_dir=f"{args.base_dir}/data/fineweb/sample-350BT/train/0",
         item_loader=TokensLoader(block_size=2048 + 1),
     )
+    dataset = dataset[:500000]
     # 3M examples/GPU for 10k steps
-    shard_size = int(1e6)
+    shard_size = int(62500)
     # shard_size = len(dataset) // args.shard[1]
     dataset = dataset[
         args.base
@@ -117,8 +117,6 @@ if __name__ == "__main__":
     )
     print("After annotation: Total number of examples:", len(dataset))
 
-    output_dir = (
-        f"{args.base_dir}/out/fineweb/sample-350BT/train/1/fineweb-edu-prediction"
-    )
+    output_dir = f"{args.base_dir}/out/fineweb/sample-350BT/train/0/500000/fineweb-edu-prediction"
     print(f"Saving to {output_dir}")
     dataset.save_to_disk(output_dir + f"/{args.shard[0]}")
